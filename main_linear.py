@@ -50,7 +50,7 @@ def parse_option():
     # model dataset
     parser.add_argument('--model', type=str, default='resnet50')
     parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=['cifar10', 'cifar100'], help='dataset')
+                        choices=['cifar10', 'cifar100', 'path'], help='dataset')
 
     # other setting
     parser.add_argument('--cosine', action='store_true',
@@ -61,10 +61,17 @@ def parse_option():
     parser.add_argument('--ckpt', type=str, default='',
                         help='path to pre-trained model')
 
+    parser.add_argument('--mean', type=str, help='mean of dataset in path in form of str tuple')
+    parser.add_argument('--std', type=str, help='std of dataset in path in form of str tuple')
+    parser.add_argument('--data_folder', type=str, default=None, help='path to custom dataset')
+
     opt = parser.parse_args()
 
-    # set the path according to the environment
-    opt.data_folder = './datasets/'
+    if opt.dataset == 'path':
+        assert opt.data_folder is not None \
+            and opt.mean is not None \
+            and opt.std is not None
+
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -94,6 +101,8 @@ def parse_option():
         opt.n_cls = 10
     elif opt.dataset == 'cifar100':
         opt.n_cls = 100
+    elif opt.dataset == "path":
+        opt.n_cls = 1000
     else:
         raise ValueError('dataset not supported: {}'.format(opt.dataset))
 
@@ -107,7 +116,8 @@ def set_model(opt):
     classifier = LinearClassifier(name=opt.model, num_classes=opt.n_cls)
 
     ckpt = torch.load(opt.ckpt, map_location='cpu')
-    state_dict = ckpt['model']
+    state_dict_key = 'state_dict' if 'state_dict' in ckpt.keys() else 'model'
+    state_dict = ckpt[state_dict_key]
 
     if torch.cuda.is_available():
         if torch.cuda.device_count() > 1:
@@ -122,7 +132,10 @@ def set_model(opt):
         classifier = classifier.cuda()
         criterion = criterion.cuda()
         cudnn.benchmark = True
-
+        state_dict = {
+            k.replace("module.encoder", "encoder.module").replace("module.head", "head"): v
+            for (k, v) in state_dict.items()
+        }
         model.load_state_dict(state_dict)
     else:
         raise NotImplementedError('This code requires GPU')
@@ -144,8 +157,9 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, opt):
     for idx, (images, labels) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
-        images = images.cuda(non_blocking=True)
-        labels = labels.cuda(non_blocking=True)
+        if True:
+            images = images.cuda(non_blocking=True)
+            labels = labels.cuda(non_blocking=True)
         bsz = labels.shape[0]
 
         # warm-up learning rate
@@ -197,8 +211,11 @@ def validate(val_loader, model, classifier, criterion, opt):
     with torch.no_grad():
         end = time.time()
         for idx, (images, labels) in enumerate(val_loader):
-            images = images.float().cuda()
-            labels = labels.cuda()
+            images = images.float()
+            labels = labels
+            if True:
+                images = images.cuda()
+                labels = labels.cuda()
             bsz = labels.shape[0]
 
             # forward

@@ -77,6 +77,24 @@ def parse_option():
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
 
+parser.add_argument('--world-size', default=-1, type=int,
+                    help='number of nodes for distributed training')
+parser.add_argument('--rank', default=-1, type=int,
+                    help='node rank for distributed training')
+parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
+                    help='url used to set up distributed training')
+parser.add_argument('--dist-backend', default='nccl', type=str,
+                    help='distributed backend')
+parser.add_argument('--seed', default=None, type=int,
+                    help='seed for initializing training. ')
+parser.add_argument('--gpu', default=None, type=int,
+                    help='GPU id to use.')
+parser.add_argument('--multiprocessing-distributed', action='store_true',
+                    help='Use multi-processing distributed training to launch '
+                         'N processes per node, which has N GPUs. This is the '
+                         'fastest way to use PyTorch for either single node or '
+                         'multi node data parallel training')
+
     opt = parser.parse_args()
 
     # check if dataset is path that passed required arguments
@@ -88,8 +106,8 @@ def parse_option():
     # set the path according to the environment
     if opt.data_folder is None:
         opt.data_folder = './datasets/'
-    opt.model_path = './save/SupCon/{}_models'.format(opt.dataset)
-    opt.tb_path = './save/SupCon/{}_tensorboard'.format(opt.dataset)
+    opt.model_path = '/data/checkpoints/SupCon/save/SupCon/{}_models'.format(opt.dataset)
+    opt.tb_path = '/data/checkpoints/SupCon/save/SupCon/{}_tensorboard'.format(opt.dataset)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -144,36 +162,39 @@ def set_loader(opt):
     normalize = transforms.Normalize(mean=mean, std=std)
 
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(size=opt.size, scale=(0.2, 1.)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomApply([
             transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
         ], p=0.8),
         transforms.RandomGrayscale(p=0.2),
-        transforms.ToTensor(),
         normalize,
     ])
+    img_transform = TwoCropTransform(transforms.Compose([
+        transforms.RandomResizedCrop(size=opt.size, scale=(0.2, 1.)),
+        transforms.ToTensor(),
+    ]))
 
     if opt.dataset == 'cifar10':
         train_dataset = datasets.CIFAR10(root=opt.data_folder,
-                                         transform=TwoCropTransform(train_transform),
+                                         transform=img_transform,
                                          download=True)
     elif opt.dataset == 'cifar100':
         train_dataset = datasets.CIFAR100(root=opt.data_folder,
-                                          transform=TwoCropTransform(train_transform),
+                                          transform=img_transform,
                                           download=True)
     elif opt.dataset == 'path':
         train_dataset = datasets.ImageFolder(root=opt.data_folder,
-                                            transform=TwoCropTransform(train_transform))
+                                             transform=img_transform)
     else:
         raise ValueError(opt.dataset)
 
-    train_sampler = None
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
-        num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler)
+        train_dataset, batch_size=opt.batch_size, shuffle=False,
+        num_workers=opt.num_workers,
+        sampler=train_sampler) #persistent_workers=True, prefetch_factor=4)
 
-    return train_loader
+    return train_loader, train_transform
 
 
 def set_model(opt):
@@ -194,7 +215,7 @@ def set_model(opt):
     return model, criterion
 
 
-def train(train_loader, model, criterion, optimizer, epoch, opt):
+def train(train_loader, model, criterion, optimizer, epoch, opt, train_transform):
     """one epoch training"""
     model.train()
 
@@ -203,13 +224,22 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
     losses = AverageMeter()
 
     end = time.time()
-    for idx, (images, labels) in enumerate(train_loader):
+    idx = 0
+    import ipdb ; ipdb.set_trace()
+    for (images, labels) in train_loader:
         data_time.update(time.time() - end)
+        if idx >= len(train_loader):
+            return
 
-        images = torch.cat([images[0], images[1]], dim=0)
         if torch.cuda.is_available():
-            images = images.cuda(non_blocking=True)
+            images = [
+                images[0].cuda(non_blocking=True),
+                images[1].cuda(non_blocking=True)
+            ]
             labels = labels.cuda(non_blocking=True)
+
+        images = [train_transform(images[0]), train_transform(images[1])]
+        images = torch.cat([images[0], images[1]], dim=0)
         bsz = labels.shape[0]
 
         # warm-up learning rate
@@ -248,6 +278,7 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=losses))
             sys.stdout.flush()
+        idx += 1
 
     return losses.avg
 
@@ -256,7 +287,7 @@ def main():
     opt = parse_option()
 
     # build data loader
-    train_loader = set_loader(opt)
+    train_loader, train_transform = set_loader(opt)
 
     # build model and criterion
     model, criterion = set_model(opt)
@@ -273,7 +304,7 @@ def main():
 
         # train for one epoch
         time1 = time.time()
-        loss = train(train_loader, model, criterion, optimizer, epoch, opt)
+        loss = train(train_loader, model, criterion, optimizer, epoch, opt, train_transform)
         time2 = time.time()
         print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 

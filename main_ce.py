@@ -123,6 +123,9 @@ def set_loader(opt):
     elif opt.dataset == 'cifar100':
         mean = (0.5071, 0.4867, 0.4408)
         std = (0.2675, 0.2565, 0.2761)
+    elif opt.dataset == 'path':
+        mean = eval(opt.mean)
+        std = eval(opt.std)
     else:
         raise ValueError('dataset not supported: {}'.format(opt.dataset))
     normalize = transforms.Normalize(mean=mean, std=std)
@@ -135,6 +138,8 @@ def set_loader(opt):
     ])
 
     val_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
         transforms.ToTensor(),
         normalize,
     ])
@@ -153,8 +158,19 @@ def set_loader(opt):
         val_dataset = datasets.CIFAR100(root=opt.data_folder,
                                         train=False,
                                         transform=val_transform)
+    elif opt.dataset == "path":
+        train_folder = os.path.join(opt.data_folder, "train")
+        val_folder = os.path.join(opt.data_folder, "val")
+        train_dataset = datasets.ImageFolder(
+            root=train_folder,
+            transform=train_transform,
+        )
+        val_dataset = datasets.ImageFolder(
+            root=val_folder,
+            transform=val_transform,
+        )
     else:
-        raise ValueError(opt.dataset)
+        raise AssertionError(f"Dataset: {opt.dataset} not found.")
 
     train_sampler = None
     train_loader = torch.utils.data.DataLoader(
